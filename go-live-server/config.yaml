@@ -1,0 +1,19 @@
+server:
+  port: 9090
+  mode: debug    # debug | release | test
+
+srs:
+  api_url: "http://localhost:1985"
+  rtmp_base_url: "rtmp://localhost:1935/live"
+
+database:
+  host: localhost
+  port: 5432
+  user: live
+  password: live_password
+  dbname: live
+  sslmode: disable
+  timezone: Asia/Shanghai
+
+nginx:
+  hls_base_url: "http://localhost:8080/live"

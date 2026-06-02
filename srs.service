@@ -1,0 +1,19 @@
+[Unit]
+Description=SRS 5.0 Streaming Media Server
+Documentation=https://github.com/ossrs/srs
+After=network.target remote-fs.target
+
+[Service]
+Type=simple
+ExecStartPre=/bin/mkdir -p /dev/shm/hls /var/log/srs
+ExecStart=/usr/local/srs/objs/srs -c /usr/local/srs/conf/minimal.conf
+WorkingDirectory=/usr/local/srs/trunk
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+LimitCORE=infinity
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
