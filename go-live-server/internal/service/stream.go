@@ -23,18 +23,20 @@ type StreamService struct {
 	cache      *cache.Client
 	nginxBase  string
 	rtmpBase   string
-	jwtSecret  string
+	pushSecret string // HMAC secret for push URL signing
 	pushExpiry time.Duration
-	playSecret string
+	playSecret string // HMAC secret for play URL signing
 	playExpiry time.Duration
+	jwtSecret  string // JWT secret for admin API tokens
 }
 
 // NewStreamService creates a StreamService.
 func NewStreamService(
 	db *store.DB, srs *adapter.SRSAPI, ch *cache.Client,
 	nginxBase, rtmpBase string,
-	jwtSecret string, pushExpiry time.Duration,
+	pushSecret string, pushExpiry time.Duration,
 	playSecret string, playExpiry time.Duration,
+	jwtSecret string,
 ) *StreamService {
 	return &StreamService{
 		db:         db,
@@ -42,10 +44,11 @@ func NewStreamService(
 		cache:      ch,
 		nginxBase:  nginxBase,
 		rtmpBase:   rtmpBase,
-		jwtSecret:  jwtSecret,
+		pushSecret: pushSecret,
 		pushExpiry: pushExpiry,
 		playSecret: playSecret,
 		playExpiry: playExpiry,
+		jwtSecret:  jwtSecret,
 	}
 }
 
@@ -72,12 +75,11 @@ func (s *StreamService) CreateStream(req *CreateStreamRequest) (*model.Stream, e
 		channelID = &req.ChannelID
 	}
 
-	pushToken, err := auth.GeneratePushToken(streamKey, s.jwtSecret, s.pushExpiry)
-	if err != nil {
-		return nil, fmt.Errorf("generate push token: %w", err)
-	}
+	// Generate HMAC push token (short-lived, no JWT)
+	pushExpire := time.Now().Add(s.pushExpiry).Unix()
+	pushToken := auth.GeneratePushSign(streamKey, pushExpire, s.pushSecret)
 
-	pushURL := fmt.Sprintf("%s/%s?token=%s", s.rtmpBase, streamKey, pushToken)
+	pushURL := fmt.Sprintf("%s/%s?token=%s&expire=%d", s.rtmpBase, streamKey, pushToken, pushExpire)
 	hlsURL := s.generatePlayURL(streamKey, "m3u8")
 	flvURL := s.generatePlayURL(streamKey, "flv")
 
@@ -103,7 +105,10 @@ func (s *StreamService) CreateStream(req *CreateStreamRequest) (*model.Stream, e
 	s.cacheStatus(ctx, stream)
 	s.cachePlayURLs(ctx, stream)
 
-	log.Printf("[service] stream created: id=%s key=%s", stream.ID, streamKey)
+	// Auto-create start_push agent task so the Pi picks it up immediately
+	s.createAgentTask(stream, model.ActionStartPush)
+
+	log.Printf("[service] stream created+started: id=%s key=%s", stream.ID, streamKey)
 	return stream, nil
 }
 
@@ -147,18 +152,6 @@ func (s *StreamService) DeleteStream(id string) error {
 	if s.cache != nil {
 		ctx := context.Background()
 		s.cache.DeleteStreamCache(ctx, id)
-
-		// Blacklist the push token for its remaining validity
-		if stream.PushToken != "" {
-			// Calculate remaining TTL from JWT expiry
-			claims, _ := auth.ValidateToken(stream.PushToken, s.jwtSecret)
-			if claims != nil {
-				if expFloat, ok := claims["exp"].(float64); ok {
-					remaining := time.Until(time.Unix(int64(expFloat), 0))
-					s.cache.BlacklistToken(ctx, stream.PushToken, remaining)
-				}
-			}
-		}
 	}
 
 	return s.db.DeleteStream(id)
@@ -194,36 +187,19 @@ func (s *StreamService) StopStream(id string) error {
 	return nil
 }
 
-// RefreshPushToken generates a new JWT push token, blacklists the old one, and updates.
+// RefreshPushToken generates a new HMAC push token with fresh expiry and updates the DB.
 func (s *StreamService) RefreshPushToken(id string) (*model.Stream, error) {
 	stream, err := s.db.GetStreamByID(id)
 	if err != nil {
 		return nil, fmt.Errorf("get stream: %w", err)
 	}
 
-	oldToken := stream.PushToken
-
-	pushToken, err := auth.GeneratePushToken(stream.StreamKey, s.jwtSecret, s.pushExpiry)
-	if err != nil {
-		return nil, fmt.Errorf("generate push token: %w", err)
-	}
-
-	pushURL := fmt.Sprintf("%s/%s?token=%s", s.rtmpBase, stream.StreamKey, pushToken)
+	pushExpire := time.Now().Add(s.pushExpiry).Unix()
+	pushToken := auth.GeneratePushSign(stream.StreamKey, pushExpire, s.pushSecret)
+	pushURL := fmt.Sprintf("%s/%s?token=%s&expire=%d", s.rtmpBase, stream.StreamKey, pushToken, pushExpire)
 
 	if err := s.db.UpdateStreamToken(id, pushToken); err != nil {
 		return nil, fmt.Errorf("update push token: %w", err)
-	}
-
-	// Blacklist old token
-	if s.cache != nil && oldToken != "" {
-		ctx := context.Background()
-		claims, _ := auth.ValidateToken(oldToken, s.jwtSecret)
-		if claims != nil {
-			if expFloat, ok := claims["exp"].(float64); ok {
-				remaining := time.Until(time.Unix(int64(expFloat), 0))
-				s.cache.BlacklistToken(ctx, oldToken, remaining)
-			}
-		}
 	}
 
 	stream.PushToken = pushToken
@@ -234,46 +210,32 @@ func (s *StreamService) RefreshPushToken(id string) (*model.Stream, error) {
 }
 
 // ValidatePushToken validates a JWT push token (checks JWT + blacklist).
-func (s *StreamService) ValidatePushToken(streamKey string, token string) error {
+// ValidatePushToken validates an HMAC push token and expiry for the given stream key.
+func (s *StreamService) ValidatePushToken(streamKey string, token string, expire int64) error {
 	if token == "" {
 		metrics.AuthFailuresTotal.WithLabelValues("publish").Inc()
 		return fmt.Errorf("push token is required")
 	}
-
-	// Check blacklist first
-	if s.cache != nil {
-		ctx := context.Background()
-		blacklisted, err := s.cache.IsTokenBlacklisted(ctx, token)
-		if err == nil && blacklisted {
-			metrics.AuthFailuresTotal.WithLabelValues("publish").Inc()
-			return fmt.Errorf("push token has been revoked")
-		}
+	if expire <= time.Now().Unix() {
+		metrics.AuthFailuresTotal.WithLabelValues("publish").Inc()
+		return fmt.Errorf("push token has expired")
 	}
-
-	claims, err := auth.ValidateToken(token, s.jwtSecret)
-	if err != nil {
+	if err := auth.ValidatePushSign(streamKey, expire, token, s.pushSecret); err != nil {
 		metrics.AuthFailuresTotal.WithLabelValues("publish").Inc()
 		return fmt.Errorf("invalid push token: %w", err)
 	}
-
-	claimKey, ok := claims["stream_key"].(string)
-	if !ok || claimKey != streamKey {
-		metrics.AuthFailuresTotal.WithLabelValues("publish").Inc()
-		return fmt.Errorf("token stream_key mismatch")
-	}
-
 	return nil
 }
 
-// OnPublish handles the SRS on_publish callback. Validates token, updates DB + cache.
-func (s *StreamService) OnPublish(streamKey string, token string) error {
+// OnPublish handles the SRS on_publish callback. Validates token+expire, updates DB + cache.
+func (s *StreamService) OnPublish(streamKey string, token string, expire int64) error {
 	stream, err := s.db.GetStreamByKey(streamKey)
 	if err != nil {
 		log.Printf("[service] on_publish: unknown stream key=%s", streamKey)
 		return nil
 	}
 
-	if err := s.ValidatePushToken(stream.StreamKey, token); err != nil {
+	if err := s.ValidatePushToken(stream.StreamKey, token, expire); err != nil {
 		log.Printf("[service] on_publish: push token invalid for key=%s: %v", streamKey, err)
 		return err
 	}

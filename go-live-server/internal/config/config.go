@@ -57,6 +57,7 @@ type NginxConfig struct {
 // AuthConfig holds JWT, HMAC, and admin login settings.
 type AuthConfig struct {
 	JWTSecret        string `yaml:"jwt_secret"`
+	PushSecret       string `yaml:"push_secret"`
 	PushTokenExpiry  string `yaml:"push_token_expiry"`
 	PlaySecret       string `yaml:"play_secret"`
 	PlayTokenExpiry  string `yaml:"play_token_expiry"`
@@ -153,6 +154,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Auth.JWTSecret == "" {
 		cfg.Auth.JWTSecret = "change-me-in-production"
+	}
+	if cfg.Auth.PushSecret == "" {
+		cfg.Auth.PushSecret = "change-me-push-secret"
 	}
 	if cfg.Auth.PlaySecret == "" {
 		cfg.Auth.PlaySecret = "change-me-play-secret"

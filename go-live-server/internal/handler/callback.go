@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"go-live-server/internal/metrics"
@@ -34,36 +35,24 @@ type srsCallback struct {
 }
 
 // Publish handles SRS on_publish callback.
-// Extracts the JWT token from the RTMP URL and validates it.
-// Handles two formats:
+// Extracts HMAC token + expire from the RTMP URL and validates them.
+//
+// Two formats are supported:
 //  1. SRS passes query params via the "param" field (e.g., OBS, SRS API)
-//  2. librtmp/FFmpeg appends "?token=xxx" to the stream name directly
+//  2. librtmp/FFmpeg appends "?token=xxx&expire=123" to the stream name directly
 //
 // Returns 200 (allow) on success, 403 (reject) on auth failure.
 func (h *CallbackHandler) Publish(c *gin.Context) {
 	var body srsCallback
 	if err := c.ShouldBindJSON(&body); err != nil {
-		// Parse error — always return 200 with code 0 so SRS doesn't retry
+		// Parse error — always return 200 so SRS doesn't retry
 		c.JSON(http.StatusOK, H{"code": 0})
 		return
 	}
 
-	streamKey := body.Stream
-	token := ""
+	streamKey, token, expire := h.parsePushAuth(body.Stream, body.Param)
 
-	// Prefer the SRS "param" field (query string from RTMP URL).
-	// Works when SRS correctly separates params (e.g., OBS).
-	token = extractToken(body.Param)
-
-	// Fallback: librtmp/FFmpeg treats "?" as part of the stream name.
-	// The stream name becomes "key?token=xxx" — split it manually.
-	if token == "" && strings.Contains(streamKey, "?token=") {
-		idx := strings.Index(streamKey, "?token=")
-		token = streamKey[idx+7:] // skip "?token="
-		streamKey = streamKey[:idx]
-	}
-
-	if err := h.svc.OnPublish(streamKey, token); err != nil {
+	if err := h.svc.OnPublish(streamKey, token, expire); err != nil {
 		log.Printf("[callback] on_publish rejected: key=%s err=%v", streamKey, err)
 		metrics.SrsCallbackErrorsTotal.WithLabelValues("on_publish").Inc()
 		c.JSON(http.StatusForbidden, H{"code": 1005, "msg": "unauthorized"})
@@ -81,11 +70,7 @@ func (h *CallbackHandler) Unpublish(c *gin.Context) {
 		return
 	}
 
-	streamKey := body.Stream
-	// Strip ?token= suffix if present (librtmp compatibility)
-	if idx := strings.Index(streamKey, "?token="); idx >= 0 {
-		streamKey = streamKey[:idx]
-	}
+	streamKey, _, _ := h.parsePushAuth(body.Stream, body.Param)
 
 	if err := h.svc.OnUnpublish(streamKey); err != nil {
 		c.JSON(http.StatusOK, H{"code": 0})
@@ -102,7 +87,7 @@ func (h *CallbackHandler) Play(c *gin.Context) {
 		c.JSON(http.StatusOK, H{"code": 0})
 		return
 	}
-	streamKey := cleanStreamKey(body.Stream)
+	streamKey, _, _ := h.parsePushAuth(body.Stream, body.Param)
 	h.svc.OnPlay(streamKey)
 	c.JSON(http.StatusOK, H{"code": 0})
 }
@@ -114,32 +99,55 @@ func (h *CallbackHandler) Stop(c *gin.Context) {
 		c.JSON(http.StatusOK, H{"code": 0})
 		return
 	}
-	streamKey := cleanStreamKey(body.Stream)
+	streamKey, _, _ := h.parsePushAuth(body.Stream, body.Param)
 	h.svc.OnStop(streamKey)
 	c.JSON(http.StatusOK, H{"code": 0})
 }
 
-// cleanStreamKey strips librtmp-style ?token= suffix from the stream name.
-func cleanStreamKey(stream string) string {
-	if idx := strings.Index(stream, "?token="); idx >= 0 {
-		return stream[:idx]
+// parsePushAuth extracts stream_key, token, and expire from SRS callback data.
+//
+// Priority 1: SRS "param" field (query string like "token=xxx&expire=123").
+// Priority 2: librtmp/FFmpeg appends "?token=xxx&expire=123" to the stream name.
+// Priority 3: No auth params — return stream key as-is with empty token/expire.
+func (h *CallbackHandler) parsePushAuth(stream, param string) (streamKey string, token string, expire int64) {
+	streamKey = stream
+
+	// Try format 1: SRS param field (semicolon or ampersand separated)
+	if param != "" {
+		token, expire = parseTokenParams(param)
+		if token != "" {
+			return
+		}
 	}
-	return stream
+
+	// Try format 2: librtmp/FFmpeg — query string appended to stream name
+	if idx := strings.Index(streamKey, "?token="); idx >= 0 {
+		queryPart := streamKey[idx+1:] // strip leading "?"
+		streamKey = streamKey[:idx]
+		t, e := parseTokenParams(queryPart)
+		if t != "" {
+			token = t
+			expire = e
+			return
+		}
+	}
+
+	return
 }
 
-// extractToken parses the token from an SRS param field.
-// SRS may include a leading "?" (e.g., "?token=xxx" or "token=xxx").
-func extractToken(param string) string {
-	if param == "" {
-		return ""
-	}
-	// Strip leading "?" if present
-	if strings.HasPrefix(param, "?") {
-		param = param[1:]
-	}
-	values, err := url.ParseQuery(param)
+// parseTokenParams extracts token and expire from a query-string-like param value.
+// Handles: "token=xxx&expire=123", "?token=xxx&expire=123", "token=xxx"
+func parseTokenParams(raw string) (token string, expire int64) {
+	raw = strings.TrimPrefix(raw, "?")
+	values, err := url.ParseQuery(raw)
 	if err != nil {
-		return ""
+		return "", 0
 	}
-	return values.Get("token")
+	token = values.Get("token")
+	if expireStr := values.Get("expire"); expireStr != "" {
+		if e, err := strconv.ParseInt(expireStr, 10, 64); err == nil {
+			expire = e
+		}
+	}
+	return
 }

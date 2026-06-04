@@ -60,10 +60,11 @@ func main() {
 		cacheClient,
 		cfg.Nginx.HlsBaseURL,
 		cfg.SRS.RtmpBaseURL,
-		cfg.Auth.JWTSecret,
+		cfg.Auth.PushSecret,
 		cfg.Auth.PushExpiry(),
 		cfg.Auth.PlaySecret,
 		cfg.Auth.PlayExpiry(),
+		cfg.Auth.JWTSecret,
 	)
 
 	// ---- handlers ----
