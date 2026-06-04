@@ -45,6 +45,7 @@ type Stream struct {
 	Resolution string     `gorm:"size:20"                                         json:"resolution,omitempty"`
 	Bitrate    string     `gorm:"size:10"                                         json:"bitrate,omitempty"`
 	Status     string     `gorm:"size:20;default:created"                         json:"status"`
+	PushToken  string     `gorm:"type:text"                                       json:"push_token,omitempty"`
 	PushURL    string     `gorm:"type:text"                                       json:"push_url,omitempty"`
 	HlsURL     string     `gorm:"type:text"                                       json:"hls_url,omitempty"`
 	FlvURL     string     `gorm:"type:text"                                       json:"flv_url,omitempty"`

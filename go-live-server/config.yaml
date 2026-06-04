@@ -17,3 +17,21 @@ database:
 
 nginx:
   hls_base_url: "http://localhost:8080/live"
+
+auth:
+  jwt_secret: "change-me-in-production"
+  push_token_expiry: "24h"
+  play_secret: "change-me-play-secret"
+  play_token_expiry: "24h"
+  admin_username: "admin"
+  admin_password: "admin123"
+  admin_token_expiry: "8h"
+
+redis:
+  host: localhost
+  port: 6379
+  password: ""
+  db: 0
+  cache_ttl: "1h"
+  viewer_count_method: "callback"   # "callback" or "polling"
+  polling_interval: "60s"

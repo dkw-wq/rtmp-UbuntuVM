@@ -1,11 +1,15 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
 
 	"go-live-server/internal/adapter"
+	"go-live-server/internal/auth"
+	"go-live-server/internal/cache"
+	"go-live-server/internal/metrics"
 	"go-live-server/internal/model"
 	"go-live-server/internal/store"
 
@@ -14,19 +18,34 @@ import (
 
 // StreamService contains all the business logic for streams.
 type StreamService struct {
-	db    *store.DB
-	srs   *adapter.SRSAPI
-	nginxBase string
-	rtmpBase  string
+	db         *store.DB
+	srs        *adapter.SRSAPI
+	cache      *cache.Client
+	nginxBase  string
+	rtmpBase   string
+	jwtSecret  string
+	pushExpiry time.Duration
+	playSecret string
+	playExpiry time.Duration
 }
 
 // NewStreamService creates a StreamService.
-func NewStreamService(db *store.DB, srs *adapter.SRSAPI, nginxBase, rtmpBase string) *StreamService {
+func NewStreamService(
+	db *store.DB, srs *adapter.SRSAPI, ch *cache.Client,
+	nginxBase, rtmpBase string,
+	jwtSecret string, pushExpiry time.Duration,
+	playSecret string, playExpiry time.Duration,
+) *StreamService {
 	return &StreamService{
-		db:        db,
-		srs:       srs,
-		nginxBase: nginxBase,
-		rtmpBase:  rtmpBase,
+		db:         db,
+		srs:        srs,
+		cache:      ch,
+		nginxBase:  nginxBase,
+		rtmpBase:   rtmpBase,
+		jwtSecret:  jwtSecret,
+		pushExpiry: pushExpiry,
+		playSecret: playSecret,
+		playExpiry: playExpiry,
 	}
 }
 
@@ -38,7 +57,8 @@ type CreateStreamRequest struct {
 	Bitrate    string `json:"bitrate"`
 }
 
-// CreateStream generates a stream_key, builds URLs, and saves the stream.
+// CreateStream generates a stream_key, push token, signed play URL, and saves the stream.
+// Write-through cache: saves to Redis alongside PostgreSQL.
 func (s *StreamService) CreateStream(req *CreateStreamRequest) (*model.Stream, error) {
 	streamKey := uuid.New().String()
 
@@ -52,6 +72,15 @@ func (s *StreamService) CreateStream(req *CreateStreamRequest) (*model.Stream, e
 		channelID = &req.ChannelID
 	}
 
+	pushToken, err := auth.GeneratePushToken(streamKey, s.jwtSecret, s.pushExpiry)
+	if err != nil {
+		return nil, fmt.Errorf("generate push token: %w", err)
+	}
+
+	pushURL := fmt.Sprintf("%s/%s?token=%s", s.rtmpBase, streamKey, pushToken)
+	hlsURL := s.generatePlayURL(streamKey, "m3u8")
+	flvURL := s.generatePlayURL(streamKey, "flv")
+
 	stream := &model.Stream{
 		ChannelID:  channelID,
 		StreamKey:  streamKey,
@@ -59,21 +88,40 @@ func (s *StreamService) CreateStream(req *CreateStreamRequest) (*model.Stream, e
 		Resolution: req.Resolution,
 		Bitrate:    req.Bitrate,
 		Status:     model.StatusCreated,
-		PushURL:    fmt.Sprintf("%s/%s", s.rtmpBase, streamKey),
-		HlsURL:     fmt.Sprintf("%s/%s.m3u8", s.nginxBase, streamKey),
-		FlvURL:     fmt.Sprintf("%s/%s.flv", s.nginxBase, streamKey),
+		PushToken:  pushToken,
+		PushURL:    pushURL,
+		HlsURL:     hlsURL,
+		FlvURL:     flvURL,
 	}
 
 	if err := s.db.CreateStream(stream); err != nil {
 		return nil, fmt.Errorf("create stream: %w", err)
 	}
 
+	// Write-through cache
+	ctx := context.Background()
+	s.cacheStatus(ctx, stream)
+	s.cachePlayURLs(ctx, stream)
+
 	log.Printf("[service] stream created: id=%s key=%s", stream.ID, streamKey)
 	return stream, nil
 }
 
-// GetStream returns a single stream by ID.
+// GetStream returns a single stream by ID. Tries Redis cache first, falls back to DB.
 func (s *StreamService) GetStream(id string) (*model.Stream, error) {
+	// Try cache first
+	if s.cache != nil {
+		ctx := context.Background()
+		cached, err := s.cache.GetStreamStatus(ctx, id)
+		if err == nil && cached != nil {
+			stream := &model.Stream{
+				ID:     id,
+				Status: cached.Status,
+			}
+			return stream, nil
+		}
+	}
+	// Fallback to DB
 	return s.db.GetStreamByID(id)
 }
 
@@ -82,20 +130,36 @@ func (s *StreamService) ListStreams(status string) ([]model.Stream, error) {
 	return s.db.ListStreams(status)
 }
 
-// DeleteStream stops publishing (if active) and deletes the stream.
+// DeleteStream stops publishing (if active), cleans cache, blacklists token, deletes from DB.
 func (s *StreamService) DeleteStream(id string) error {
 	stream, err := s.db.GetStreamByID(id)
 	if err != nil {
 		return err
 	}
 
-	// If currently publishing, kick the SRS client first
 	if stream.Status == model.StatusPublishing {
 		s.stopPublishing(stream)
 	}
 
-	// Create a stop task so the agent can clean up FFmpeg
 	s.createAgentTask(stream, model.ActionStopPush)
+
+	// Cleanup Redis cache
+	if s.cache != nil {
+		ctx := context.Background()
+		s.cache.DeleteStreamCache(ctx, id)
+
+		// Blacklist the push token for its remaining validity
+		if stream.PushToken != "" {
+			// Calculate remaining TTL from JWT expiry
+			claims, _ := auth.ValidateToken(stream.PushToken, s.jwtSecret)
+			if claims != nil {
+				if expFloat, ok := claims["exp"].(float64); ok {
+					remaining := time.Until(time.Unix(int64(expFloat), 0))
+					s.cache.BlacklistToken(ctx, stream.PushToken, remaining)
+				}
+			}
+		}
+	}
 
 	return s.db.DeleteStream(id)
 }
@@ -130,24 +194,115 @@ func (s *StreamService) StopStream(id string) error {
 	return nil
 }
 
-// OnPublish handles the SRS on_publish callback.
-// It looks up the stream by stream_key and marks it as "publishing".
-func (s *StreamService) OnPublish(streamKey string) error {
+// RefreshPushToken generates a new JWT push token, blacklists the old one, and updates.
+func (s *StreamService) RefreshPushToken(id string) (*model.Stream, error) {
+	stream, err := s.db.GetStreamByID(id)
+	if err != nil {
+		return nil, fmt.Errorf("get stream: %w", err)
+	}
+
+	oldToken := stream.PushToken
+
+	pushToken, err := auth.GeneratePushToken(stream.StreamKey, s.jwtSecret, s.pushExpiry)
+	if err != nil {
+		return nil, fmt.Errorf("generate push token: %w", err)
+	}
+
+	pushURL := fmt.Sprintf("%s/%s?token=%s", s.rtmpBase, stream.StreamKey, pushToken)
+
+	if err := s.db.UpdateStreamToken(id, pushToken); err != nil {
+		return nil, fmt.Errorf("update push token: %w", err)
+	}
+
+	// Blacklist old token
+	if s.cache != nil && oldToken != "" {
+		ctx := context.Background()
+		claims, _ := auth.ValidateToken(oldToken, s.jwtSecret)
+		if claims != nil {
+			if expFloat, ok := claims["exp"].(float64); ok {
+				remaining := time.Until(time.Unix(int64(expFloat), 0))
+				s.cache.BlacklistToken(ctx, oldToken, remaining)
+			}
+		}
+	}
+
+	stream.PushToken = pushToken
+	stream.PushURL = pushURL
+
+	log.Printf("[service] push token refreshed: id=%s", id)
+	return stream, nil
+}
+
+// ValidatePushToken validates a JWT push token (checks JWT + blacklist).
+func (s *StreamService) ValidatePushToken(streamKey string, token string) error {
+	if token == "" {
+		metrics.AuthFailuresTotal.WithLabelValues("publish").Inc()
+		return fmt.Errorf("push token is required")
+	}
+
+	// Check blacklist first
+	if s.cache != nil {
+		ctx := context.Background()
+		blacklisted, err := s.cache.IsTokenBlacklisted(ctx, token)
+		if err == nil && blacklisted {
+			metrics.AuthFailuresTotal.WithLabelValues("publish").Inc()
+			return fmt.Errorf("push token has been revoked")
+		}
+	}
+
+	claims, err := auth.ValidateToken(token, s.jwtSecret)
+	if err != nil {
+		metrics.AuthFailuresTotal.WithLabelValues("publish").Inc()
+		return fmt.Errorf("invalid push token: %w", err)
+	}
+
+	claimKey, ok := claims["stream_key"].(string)
+	if !ok || claimKey != streamKey {
+		metrics.AuthFailuresTotal.WithLabelValues("publish").Inc()
+		return fmt.Errorf("token stream_key mismatch")
+	}
+
+	return nil
+}
+
+// OnPublish handles the SRS on_publish callback. Validates token, updates DB + cache.
+func (s *StreamService) OnPublish(streamKey string, token string) error {
 	stream, err := s.db.GetStreamByKey(streamKey)
 	if err != nil {
-		// Unknown stream key — not ours, but still acknowledge SRS
 		log.Printf("[service] on_publish: unknown stream key=%s", streamKey)
 		return nil
 	}
 
+	if err := s.ValidatePushToken(stream.StreamKey, token); err != nil {
+		log.Printf("[service] on_publish: push token invalid for key=%s: %v", streamKey, err)
+		return err
+	}
+
 	now := time.Now()
-	return s.db.UpdateStreamStatus(stream.ID, model.StatusPublishing, map[string]interface{}{
+	if err := s.db.UpdateStreamStatus(stream.ID, model.StatusPublishing, map[string]interface{}{
 		"started_at": &now,
-	})
+	}); err != nil {
+		return err
+	}
+
+	// Update cache with publishing status, refresh TTL
+	if s.cache != nil {
+		ctx := context.Background()
+		viewers, _ := s.cache.GetViewers(ctx, stream.ID)
+		s.cache.SetStreamStatus(ctx, stream.ID, cache.StreamStatusData{
+			Status:    model.StatusPublishing,
+			Bitrate:   stream.Bitrate,
+			Viewers:   viewers,
+			StartedAt: now.Format(time.RFC3339),
+		})
+	}
+
+	metrics.LiveStreamsActive.WithLabelValues(stream.ID).Set(1)
+
+	return nil
 }
 
-// OnUnpublish handles the SRS on_unpublish callback.
-// It marks the stream as "ended".
+// OnUnpublish handles the SRS on_unpublish callback. Updates DB + cache, resets viewers.
 func (s *StreamService) OnUnpublish(streamKey string) error {
 	stream, err := s.db.GetStreamByKey(streamKey)
 	if err != nil {
@@ -156,14 +311,140 @@ func (s *StreamService) OnUnpublish(streamKey string) error {
 	}
 
 	now := time.Now()
-	return s.db.UpdateStreamStatus(stream.ID, model.StatusEnded, map[string]interface{}{
+	if err := s.db.UpdateStreamStatus(stream.ID, model.StatusEnded, map[string]interface{}{
 		"ended_at": &now,
-	})
+	}); err != nil {
+		return err
+	}
+
+	// Update cache, reset viewers
+	if s.cache != nil {
+		ctx := context.Background()
+		s.cache.SetStreamStatus(ctx, stream.ID, cache.StreamStatusData{
+			Status:  model.StatusEnded,
+			Bitrate: stream.Bitrate,
+			Viewers: 0,
+		})
+		s.cache.ResetViewers(ctx, stream.ID)
+	}
+
+	// Metrics
+	if stream.StartedAt != nil {
+		duration := now.Sub(*stream.StartedAt).Seconds()
+		metrics.StreamPublishDuration.WithLabelValues(stream.ID).Set(duration)
+	}
+	metrics.LiveStreamsActive.DeleteLabelValues(stream.ID)
+	metrics.LiveViewersTotal.DeleteLabelValues(stream.ID)
+
+	return nil
+}
+
+// OnPlay handles the SRS on_play callback — increments viewer count.
+func (s *StreamService) OnPlay(streamKey string) {
+	if s.cache == nil {
+		return
+	}
+	stream, err := s.db.GetStreamByKey(streamKey)
+	if err != nil {
+		return
+	}
+	ctx := context.Background()
+	count, err := s.cache.IncrViewers(ctx, stream.ID)
+	if err != nil {
+		log.Printf("[service] incr viewers error: %v", err)
+		return
+	}
+	metrics.LiveViewersTotal.WithLabelValues(stream.ID).Set(float64(count))
+	log.Printf("[service] viewer joined: id=%s viewers=%d", stream.ID, count)
+}
+
+// OnStop handles the SRS on_stop callback — decrements viewer count.
+func (s *StreamService) OnStop(streamKey string) {
+	if s.cache == nil {
+		return
+	}
+	stream, err := s.db.GetStreamByKey(streamKey)
+	if err != nil {
+		return
+	}
+	ctx := context.Background()
+	count, err := s.cache.DecrViewers(ctx, stream.ID)
+	if err != nil {
+		log.Printf("[service] decr viewers error: %v", err)
+		return
+	}
+	metrics.LiveViewersTotal.WithLabelValues(stream.ID).Set(float64(count))
+	log.Printf("[service] viewer left: id=%s viewers=%d", stream.ID, count)
+}
+
+// ValidatePlayAuth validates HMAC play URL signature and expiry.
+func (s *StreamService) ValidatePlayAuth(streamKey string, expire int64, sign string) error {
+	if expire <= time.Now().Unix() {
+		return fmt.Errorf("play URL has expired")
+	}
+	return auth.ValidatePlaySign(streamKey, expire, sign, s.playSecret)
+}
+
+// GetPlaybackInfo looks up a stream by stream_key and returns fresh signed play URLs.
+// This is a public endpoint — no JWT required. The URLs themselves have HMAC expiry.
+func (s *StreamService) GetPlaybackInfo(streamKey string) (*model.Stream, error) {
+	stream, err := s.db.GetStreamByKey(streamKey)
+	if err != nil {
+		return nil, fmt.Errorf("stream not found: %w", err)
+	}
+	// Return a copy with freshly-signed play URLs
+	result := *stream
+	result.HlsURL = s.generatePlayURL(stream.StreamKey, "m3u8")
+	result.FlvURL = s.generatePlayURL(stream.StreamKey, "flv")
+	result.PushURL = ""    // never leak push URL
+	result.PushToken = ""  // never leak push token
+	return &result, nil
+}
+
+// GetStreamByKey returns a stream by its public stream_key.
+
+// generatePlayURL creates a signed play URL with HMAC sign+expire query params.
+func (s *StreamService) generatePlayURL(streamKey string, ext string) string {
+	expire := time.Now().Add(s.playExpiry).Unix()
+	sign := auth.GeneratePlaySign(streamKey, expire, s.playSecret)
+	return fmt.Sprintf("%s/%s.%s?sign=%s&expire=%d", s.nginxBase, streamKey, ext, sign, expire)
+}
+
+// ---------- cache helpers ----------
+
+func (s *StreamService) cacheStatus(ctx context.Context, stream *model.Stream) {
+	if s.cache == nil {
+		return
+	}
+	startedAt := ""
+	if stream.StartedAt != nil {
+		startedAt = stream.StartedAt.Format(time.RFC3339)
+	}
+	if err := s.cache.SetStreamStatus(ctx, stream.ID, cache.StreamStatusData{
+		Status:    stream.Status,
+		Bitrate:   stream.Bitrate,
+		Viewers:   0,
+		StartedAt: startedAt,
+	}); err != nil {
+		log.Printf("[service] cache status error: %v", err)
+	}
+}
+
+func (s *StreamService) cachePlayURLs(ctx context.Context, stream *model.Stream) {
+	if s.cache == nil {
+		return
+	}
+	if err := s.cache.SetPlayURLs(ctx, stream.ID, cache.PlayURLData{
+		HlsURL:    stream.HlsURL,
+		FlvURL:    stream.FlvURL,
+		WebRTCURL: stream.WebRTCURL,
+	}); err != nil {
+		log.Printf("[service] cache play urls error: %v", err)
+	}
 }
 
 // ---------- internal helpers ----------
 
-// stopPublishing finds and kicks the SRS RTMP publisher for this stream.
 func (s *StreamService) stopPublishing(stream *model.Stream) {
 	client, err := s.srs.FindPublishingClient(stream.StreamKey)
 	if err != nil {
@@ -182,7 +463,6 @@ func (s *StreamService) stopPublishing(stream *model.Stream) {
 	log.Printf("[service] kicked srs client: id=%s stream=%s", client.ID, stream.StreamKey)
 }
 
-// createAgentTask inserts a new agent task for the given action.
 func (s *StreamService) createAgentTask(stream *model.Stream, action string) {
 	task := &model.AgentTask{
 		StreamID:  stream.ID,

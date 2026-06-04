@@ -82,6 +82,34 @@ func (a *SRSAPI) FindPublishingClient(streamKey string) (*SRSClient, error) {
 	return nil, nil
 }
 
+// ListAllClients returns all connected clients from SRS (for viewer counting via polling).
+func (a *SRSAPI) ListAllClients() ([]SRSClient, error) {
+	resp, err := a.http.Get(a.baseURL + "/api/v1/clients")
+	if err != nil {
+		return nil, fmt.Errorf("srs clients request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("srs clients read: %w", err)
+	}
+
+	var srsResp srsResponse
+	if err := json.Unmarshal(body, &srsResp); err != nil {
+		return nil, fmt.Errorf("srs clients parse: %w", err)
+	}
+	if srsResp.Code != 0 {
+		return nil, fmt.Errorf("srs api error: code=%d", srsResp.Code)
+	}
+
+	var data srsClientsData
+	if err := json.Unmarshal(srsResp.Data, &data); err != nil {
+		return nil, fmt.Errorf("srs data parse: %w", err)
+	}
+	return data.Clients, nil
+}
+
 // KickClient disconnects a client by its SRS-internal client ID.
 func (a *SRSAPI) KickClient(clientID string) error {
 	req, err := http.NewRequest(http.MethodDelete, a.baseURL+"/api/v1/clients/"+clientID, nil)

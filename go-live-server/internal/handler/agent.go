@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 
+	"go-live-server/internal/metrics"
 	"go-live-server/internal/model"
 	"go-live-server/internal/store"
 
@@ -56,6 +57,26 @@ func (h *AgentHandler) GetTasks(c *gin.Context) {
 	Success(c, H{"tasks": tasks})
 }
 
+// Heartbeat receives periodic heartbeat from an agent.
+func (h *AgentHandler) Heartbeat(c *gin.Context) {
+	var req heartbeatReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		Error(c, http.StatusBadRequest, CodeInvalidParam, "invalid request: "+err.Error())
+		return
+	}
+
+	// Track FFmpeg processes via agent heartbeat
+	if req.Status == "busy" {
+		metrics.FfmpegProcessesRunning.Inc()
+	} else {
+		metrics.FfmpegProcessesRunning.Dec()
+	}
+
+	Success(c, H{
+		"agent_id": req.AgentID,
+	})
+}
+
 // UpdateTask lets the agent report task completion.
 // PUT /api/agent/tasks/:id
 func (h *AgentHandler) UpdateTask(c *gin.Context) {
@@ -72,20 +93,13 @@ func (h *AgentHandler) UpdateTask(c *gin.Context) {
 		return
 	}
 
-	Success(c, nil)
-}
-
-// Heartbeat receives periodic heartbeat from an agent.
-func (h *AgentHandler) Heartbeat(c *gin.Context) {
-	var req heartbeatReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		Error(c, http.StatusBadRequest, CodeInvalidParam, "invalid request: "+err.Error())
-		return
+	// Track FFmpeg restarts on failed tasks
+	if req.Status == model.TaskStatusFailed {
+		task, err := h.db.GetTaskByID(taskID)
+		if err == nil && task != nil {
+			metrics.FfmpegRestartTotal.WithLabelValues(task.StreamID).Inc()
+		}
 	}
 
-	// In a full implementation, we would upsert an "agents" table row here.
-	// For now, we simply acknowledge.
-	Success(c, H{
-		"agent_id": req.AgentID,
-	})
+	Success(c, nil)
 }

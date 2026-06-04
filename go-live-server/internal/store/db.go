@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go-live-server/internal/config"
+	"go-live-server/internal/metrics"
 	"go-live-server/internal/model"
 
 	"gorm.io/driver/postgres"
@@ -37,6 +38,36 @@ func New(cfg config.DatabaseConfig) (*DB, error) {
 	sqlDB.SetMaxOpenConns(25)
 	sqlDB.SetMaxIdleConns(10)
 	sqlDB.SetConnMaxLifetime(5 * time.Minute)
+
+	// ---- DB metrics: query timing via GORM callbacks ----
+	startCb := func(_ *gorm.DB) {}
+	endCb := func(_ *gorm.DB) {}
+	startCb = func(d *gorm.DB) { d.InstanceSet("metrics:start", time.Now()) }
+	endCb = func(d *gorm.DB) {
+		if start, ok := d.InstanceGet("metrics:start"); ok {
+			metrics.DbQueryDuration.Observe(time.Since(start.(time.Time)).Seconds())
+		}
+	}
+	conn.Callback().Query().Before("*").Register("metrics:query_start", startCb)
+	conn.Callback().Query().After("*").Register("metrics:query_end", endCb)
+	conn.Callback().Create().Before("*").Register("metrics:create_start", startCb)
+	conn.Callback().Create().After("*").Register("metrics:create_end", endCb)
+	conn.Callback().Update().Before("*").Register("metrics:update_start", startCb)
+	conn.Callback().Update().After("*").Register("metrics:update_end", endCb)
+	conn.Callback().Delete().Before("*").Register("metrics:delete_start", startCb)
+	conn.Callback().Delete().After("*").Register("metrics:delete_end", endCb)
+	conn.Callback().Row().Before("*").Register("metrics:row_start", startCb)
+	conn.Callback().Row().After("*").Register("metrics:row_end", endCb)
+
+	// ---- DB metrics: connection pool stats ----
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			stats := sqlDB.Stats()
+			metrics.DbConnectionsOpen.Set(float64(stats.OpenConnections))
+		}
+	}()
 
 	// auto-migrate
 	if err := conn.AutoMigrate(
@@ -97,6 +128,12 @@ func (db *DB) UpdateStreamStatus(id string, status string, extra map[string]inte
 		updates[k] = v
 	}
 	return db.Model(&model.Stream{}).Where("id = ?", id).Updates(updates).Error
+}
+
+// UpdateStreamToken updates the push_token column for a stream.
+func (db *DB) UpdateStreamToken(id string, token string) error {
+	return db.Model(&model.Stream{}).Where("id = ?", id).
+		Update("push_token", token).Error
 }
 
 // DeleteStream removes a stream by ID.
