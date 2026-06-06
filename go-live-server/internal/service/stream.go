@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"time"
 
 	"go-live-server/internal/adapter"
@@ -260,6 +262,7 @@ func (s *StreamService) OnPublish(streamKey string, token string, expire int64) 
 	}
 
 	metrics.LiveStreamsActive.WithLabelValues(stream.ID).Set(1)
+	metrics.LiveStreamBitrateKbps.WithLabelValues(stream.ID).Set(parseBitrateKbps(stream.Bitrate))
 
 	return nil
 }
@@ -297,6 +300,7 @@ func (s *StreamService) OnUnpublish(streamKey string) error {
 	}
 	metrics.LiveStreamsActive.DeleteLabelValues(stream.ID)
 	metrics.LiveViewersTotal.DeleteLabelValues(stream.ID)
+	metrics.LiveStreamBitrateKbps.DeleteLabelValues(stream.ID)
 
 	return nil
 }
@@ -439,4 +443,18 @@ func (s *StreamService) createAgentTask(stream *model.Stream, action string) {
 		return
 	}
 	log.Printf("[service] agent task created: id=%s action=%s", task.ID, action)
+}
+
+// parseBitrateKbps converts a bitrate string like "2000k" to a float64 kbps value.
+// Returns 0 for empty or unparseable strings.
+func parseBitrateKbps(s string) float64 {
+	if s == "" {
+		return 0
+	}
+	s = strings.TrimSuffix(strings.TrimSuffix(s, "k"), "K")
+	val, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0
+	}
+	return val
 }

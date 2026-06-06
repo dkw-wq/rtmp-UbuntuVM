@@ -149,11 +149,13 @@ func (db *DB) CreateTask(t *model.AgentTask) error {
 }
 
 // GetPendingTasks returns tasks with status "pending" (optionally for a specific agent).
+// When agentID is provided, returns: tasks assigned to that agent + unassigned tasks.
+// When agentID is empty, returns all pending tasks.
 func (db *DB) GetPendingTasks(agentID string) ([]model.AgentTask, error) {
 	var tasks []model.AgentTask
 	q := db.Where("status = ?", model.TaskStatusPending).Order("created_at ASC")
 	if agentID != "" {
-		q = q.Where("agent_id = ?", agentID)
+		q = q.Where("(agent_id = ? OR agent_id = '' OR agent_id IS NULL)", agentID)
 	}
 	if err := q.Find(&tasks).Error; err != nil {
 		return nil, err
@@ -173,6 +175,15 @@ func (db *DB) UpdateTaskStatus(id string, status string, errMsg string) error {
 	return db.Model(&model.AgentTask{}).Where("id = ?", id).Updates(updates).Error
 }
 
+// AssignTask claims a task for an agent (sets agent_id + status=running).
+func (db *DB) AssignTask(id string, agentID string) error {
+	return db.Model(&model.AgentTask{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"agent_id":   agentID,
+		"status":     model.TaskStatusRunning,
+		"updated_at": time.Now(),
+	}).Error
+}
+
 // GetTaskByID fetches a single task.
 func (db *DB) GetTaskByID(id string) (*model.AgentTask, error) {
 	var t model.AgentTask
@@ -180,4 +191,14 @@ func (db *DB) GetTaskByID(id string) (*model.AgentTask, error) {
 		return nil, err
 	}
 	return &t, nil
+}
+
+// CountRunningFFmpegTasks returns the count of running start_push tasks.
+// Used for the ffmpeg_processes_running metric — source of truth instead of Inc/Dec.
+func (db *DB) CountRunningFFmpegTasks() (int64, error) {
+	var count int64
+	err := db.Model(&model.AgentTask{}).
+		Where("status = ? AND action = ?", model.TaskStatusRunning, model.ActionStartPush).
+		Count(&count).Error
+	return count, err
 }

@@ -7,6 +7,8 @@ SRS_DIR="$BASE_DIR/../srs-build/trunk"
 SRS_BIN="$SRS_DIR/objs/srs"
 SRS_CONF="$SRS_DIR/conf/minimal.conf"
 SRS_HTML="$SRS_DIR/objs/nginx/html"
+REDIS_BIN="$BASE_DIR/../redis-bin/redis-7.2.5/src/redis-server"
+NODE_EXPORTER_BIN="$BASE_DIR/../node_exporter/node_exporter"
 GO_BIN="$BASE_DIR/server"
 GO_BIN_SRC="./cmd/server"
 
@@ -47,10 +49,11 @@ log "Killing any old instances ..."
 # kill leftover processes by name (no-op if none)
 pkill -f "objs/srs" 2>/dev/null || true
 pkill -f "go-live-server/server" 2>/dev/null || true
+pkill -f "redis-server" 2>/dev/null || true
 sleep 1
 
-log "Releasing ports (1935 8080 1985 9090) ..."
-for port in 1935 8080 1985 9090; do
+log "Releasing ports (1935 8080 1985 9090 9091 9100) ..."
+for port in 1935 8080 1985 9090 9091 9100; do
     if ss -lntp 2>/dev/null | grep -q ":$port "; then
         warn "  Port $port in use — killing stale process ..."
         # try user-owned first, then escalate to sudo
@@ -66,7 +69,38 @@ for port in 1935 8080 1985 9090; do
 done
 log "All ports free"
 
-# ── 6. Start SRS ────────────────────────────────────
+# ── 6. Start Redis ──────────────────────────────────
+REDIS_PID=""
+if [ -x "$REDIS_BIN" ]; then
+    log "Starting Redis (:6379) ..."
+    "$REDIS_BIN" --daemonize yes --bind 127.0.0.1 --port 6379 --loglevel notice
+    sleep 1
+    if ss -lntp 2>/dev/null | grep -q ":6379 "; then
+        log "  Redis :6379 — OK"
+    else
+        warn "  Redis :6379 — failed to start"
+    fi
+else
+    warn "Redis binary not found at $REDIS_BIN — skipping"
+fi
+
+# ── 7. Start node_exporter ──────────────────────────
+if [ -x "$NODE_EXPORTER_BIN" ]; then
+    log "Starting node_exporter (:9100) ..."
+    pkill -f "node_exporter" 2>/dev/null || true
+    sleep 0.5
+    nohup "$NODE_EXPORTER_BIN" --web.listen-address=0.0.0.0:9100 > /tmp/node_exporter.log 2>&1 &
+    sleep 1
+    if ss -lntp 2>/dev/null | grep -q ":9100 "; then
+        log "  node_exporter :9100 — OK"
+    else
+        warn "  node_exporter :9100 — failed to start"
+    fi
+else
+    warn "node_exporter binary not found at $NODE_EXPORTER_BIN — skipping"
+fi
+
+# ── 8. Start SRS ────────────────────────────────────
 log "Starting SRS (RTMP :1935, HTTP :8080, API :1985) ..."
 cd "$SRS_DIR"
 "$SRS_BIN" -c "$SRS_CONF" &
@@ -86,7 +120,7 @@ for port in 1935 8080 1985; do
     fi
 done
 
-# ── 7. Start Go server ──────────────────────────────
+# ── 9. Start Go server ──────────────────────────────
 log "Starting Go API (:9090) ..."
 cd "$BASE_DIR"
 "$GO_BIN" &
@@ -99,7 +133,7 @@ else
     warn "  Go API :9090 — not listening (check above)"
 fi
 
-# ── 8. Quick health checks ──────────────────────────
+# ── 10. Quick health checks ─────────────────────────
 log "Health checks ..."
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
 
@@ -111,7 +145,7 @@ for port in 9090 8080 1985; do
     fi
 done
 
-# ── 9. Summary ──────────────────────────────────────
+# ── 11. Summary ─────────────────────────────────────
 echo ""
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${GREEN}  All services started${NC}"
@@ -124,6 +158,6 @@ echo ""
 echo -e "  Ctrl+C to stop all services"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
-# ── 10. Wait for Ctrl+C, then cleanup ───────────────
-trap 'log "Stopping ..."; kill $SRS_PID $GO_PID 2>/dev/null; wait 2>/dev/null; log "Done."' EXIT INT TERM
+# ── 12. Wait for Ctrl+C, then cleanup ──────────────
+trap 'log "Stopping ..."; kill $SRS_PID $GO_PID 2>/dev/null; pkill -f "redis-server" 2>/dev/null; wait 2>/dev/null; log "Done."' EXIT INT TERM
 wait

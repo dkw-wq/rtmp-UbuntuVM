@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"go-live-server/internal/adapter"
@@ -14,6 +16,7 @@ import (
 	"go-live-server/internal/handler"
 	"go-live-server/internal/metrics"
 	"go-live-server/internal/middleware"
+	"go-live-server/internal/model"
 	"go-live-server/internal/service"
 	"go-live-server/internal/store"
 
@@ -77,6 +80,16 @@ func main() {
 	if cacheClient != nil && cfg.Redis.ViewerCountMethod == "polling" {
 		go runViewerPolling(srsAPI, cacheClient, cfg.Redis.PollDuration())
 	}
+
+	// ---- ffmpeg process gauge update (periodic DB poll) ----
+	// Uses DB count of running start_push tasks as source of truth.
+	// Avoids Inc/Dec drift that caused negative ffmpeg_processes_running.
+	go runFfmpegProcessUpdater(db)
+
+	// ---- startup metric reconciliation ----
+	// Restore active stream gauges from DB in case server was restarted while
+	// streams were still publishing.
+	go reconcileStreamMetrics(db, cacheClient)
 
 	// ---- metrics HTTP server (port 9091) ----
 	go func() {
@@ -142,6 +155,78 @@ func main() {
 	if err := r.Run(addr); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+// runFfmpegProcessUpdater periodically queries the DB for the count of running
+// start_push tasks and sets the ffmpeg_processes_running gauge. This replaces the
+// previous Inc/Dec approach that caused the gauge to go negative.
+func runFfmpegProcessUpdater(db *store.DB) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	// Do an immediate first update
+	if count, err := db.CountRunningFFmpegTasks(); err == nil {
+		metrics.FfmpegProcessesRunning.Set(float64(count))
+	}
+
+	for range ticker.C {
+		count, err := db.CountRunningFFmpegTasks()
+		if err != nil {
+			log.Printf("[metrics] count running ffmpeg tasks error: %v", err)
+			continue
+		}
+		metrics.FfmpegProcessesRunning.Set(float64(count))
+	}
+}
+
+// reconcileStreamMetrics reads all currently-publishing streams from the DB and
+// restores the live_streams_active / live_stream_bitrate_kbps / stream_publish_duration
+// gauges. This prevents gaps after a server restart.
+func reconcileStreamMetrics(db *store.DB, cacheClient *cache.Client) {
+	// Small delay to ensure DB is initialized
+	time.Sleep(2 * time.Second)
+
+	publishing, err := db.ListStreams(model.StatusPublishing)
+	if err != nil {
+		log.Printf("[metrics] reconcile: list publishing streams error: %v", err)
+		return
+	}
+
+	for _, s := range publishing {
+		metrics.LiveStreamsActive.WithLabelValues(s.ID).Set(1)
+		metrics.LiveStreamBitrateKbps.WithLabelValues(s.ID).Set(parseBitrateKbps(s.Bitrate))
+		if s.StartedAt != nil {
+			duration := time.Since(*s.StartedAt).Seconds()
+			metrics.StreamPublishDuration.WithLabelValues(s.ID).Set(duration)
+		}
+	}
+
+	// Also restore viewer counts from Redis cache if available
+	if cacheClient != nil {
+		ctx := context.Background()
+		for _, s := range publishing {
+			count, err := cacheClient.GetViewers(ctx, s.ID)
+			if err == nil && count > 0 {
+				metrics.LiveViewersTotal.WithLabelValues(s.ID).Set(float64(count))
+			}
+		}
+	}
+
+	log.Printf("[metrics] reconcile: restored %d publishing streams", len(publishing))
+}
+
+// parseBitrateKbps converts a bitrate string like "2000k" to a float64 kbps value.
+// Duplicated from service/stream.go to avoid circular imports.
+func parseBitrateKbps(s string) float64 {
+	if s == "" {
+		return 0
+	}
+	s = strings.TrimSuffix(strings.TrimSuffix(s, "k"), "K")
+	val, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0
+	}
+	return val
 }
 
 // runViewerPolling periodically fetches SRS client list and updates viewer counts in Redis.

@@ -4,7 +4,7 @@ server:
 
 srs:
   api_url: "http://localhost:1985"
-  rtmp_base_url: "rtmp://localhost:1935/live"
+  rtmp_base_url: "rtmp://10.95.133.96:1935/live"
 
 database:
   host: localhost
@@ -16,7 +16,7 @@ database:
   timezone: Asia/Shanghai
 
 nginx:
-  hls_base_url: "http://localhost:8080/live"
+  hls_base_url: "http://10.95.133.96:8080/live"
 
 auth:
   jwt_secret: "change-me-in-production"

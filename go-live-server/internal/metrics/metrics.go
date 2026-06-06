@@ -44,6 +44,14 @@ var (
 		[]string{"stream_id"},
 	)
 
+	LiveStreamBitrateKbps = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "live_stream_bitrate_kbps",
+			Help: "Current stream bitrate in kbps.",
+		},
+		[]string{"stream_id"},
+	)
+
 	StreamPublishDuration = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "stream_publish_duration_seconds",
@@ -131,6 +139,7 @@ func init() {
 
 		LiveStreamsActive,
 		LiveViewersTotal,
+		LiveStreamBitrateKbps,
 		StreamPublishDuration,
 		FfmpegProcessesRunning,
 		FfmpegRestartTotal,

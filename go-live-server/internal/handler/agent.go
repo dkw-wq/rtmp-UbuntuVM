@@ -49,9 +49,13 @@ func (h *AgentHandler) GetTasks(c *gin.Context) {
 		tasks = []model.AgentTask{}
 	}
 
-	// Mark fetched tasks as "running"
+	// Mark fetched tasks as "running" and assign to this agent
 	for i := range tasks {
-		_ = h.db.UpdateTaskStatus(tasks[i].ID, model.TaskStatusRunning, "")
+		if agentID != "" {
+			_ = h.db.AssignTask(tasks[i].ID, agentID)
+		} else {
+			_ = h.db.UpdateTaskStatus(tasks[i].ID, model.TaskStatusRunning, "")
+		}
 	}
 
 	Success(c, H{"tasks": tasks})
@@ -65,12 +69,8 @@ func (h *AgentHandler) Heartbeat(c *gin.Context) {
 		return
 	}
 
-	// Track FFmpeg processes via agent heartbeat
-	if req.Status == "busy" {
-		metrics.FfmpegProcessesRunning.Inc()
-	} else {
-		metrics.FfmpegProcessesRunning.Dec()
-	}
+	// NOTE: ffmpeg_processes_running is now set from a periodic DB poll
+	// (CountRunningFFmpegTasks) instead of Inc/Dec, which was causing negative values.
 
 	Success(c, H{
 		"agent_id": req.AgentID,
