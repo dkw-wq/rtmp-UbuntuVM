@@ -5,13 +5,14 @@ After=network.target remote-fs.target
 
 [Service]
 Type=simple
-ExecStartPre=/bin/mkdir -p /dev/shm/hls /var/log/srs
+ExecStartPre=/bin/mkdir -p /dev/shm/hls/live /var/log/srs
 ExecStart=/usr/local/srs/objs/srs -c /usr/local/srs/conf/minimal.conf
-WorkingDirectory=/usr/local/srs/trunk
+WorkingDirectory=/usr/local/srs
 Restart=always
 RestartSec=3
 LimitNOFILE=65536
 LimitCORE=infinity
+Environment=ASAN_OPTIONS=detect_leaks=0:halt_on_error=0
 User=root
 Group=root
 
