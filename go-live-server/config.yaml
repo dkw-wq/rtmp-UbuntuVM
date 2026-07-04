@@ -20,6 +20,7 @@ nginx:
 
 auth:
   jwt_secret: "change-me-in-production"
+  # Legacy HMAC push settings; direct publisher tokens are stored per stream.
   push_secret: "change-me-push-secret"
   push_token_expiry: "24h"
   play_secret: "change-me-play-secret"

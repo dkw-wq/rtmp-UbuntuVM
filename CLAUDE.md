@@ -4,7 +4,7 @@
 
 ## Overview
 
-Live streaming server running on Ubuntu 22.04 VM (4 vCPU / 4 GB RAM). Receives RTMP pushes from Raspberry Pi agents via FFmpeg, serves HLS/FLV to viewers via SRS 5.0. Go management server provides REST API for stream lifecycle, SRS callback handling, and agent task orchestration.
+Live streaming server running on Ubuntu 22.04 VM (4 vCPU / 4 GB RAM). Receives direct RTMP pushes from Raspberry Pi devices via FFmpeg using server-generated stream keys and publish tokens, serves HLS/FLV to viewers via SRS 5.0. Go management server provides REST API for stream lifecycle and SRS callback handling.
 
 ## Architecture
 
@@ -100,7 +100,7 @@ Override with env `CONFIG_PATH`. DSN built as: `host=X port=Y user=Z password=W 
 ## Data Models (GORM)
 
 **Stream** — status flow: `created` → `publishing` → `ended` / `error`
-- UUID PK, stream_key (unique UUID v4), channel_id (FK), protocol, resolution, bitrate, status
+- UUID PK, stream_key (unique UUID v4), push_token, channel_id (FK), protocol, resolution, bitrate, status
 - push_url, hls_url, flv_url, webrtc_url (auto-generated from base URLs)
 - started_at (set by on_publish), ended_at (set by on_unpublish)
 
@@ -108,10 +108,7 @@ Override with env `CONFIG_PATH`. DSN built as: `host=X port=Y user=Z password=W 
 
 **Recording** — FK → streams (CASCADE), file_path, file_size, duration_sec
 
-**AgentTask** — status: `pending` → `running` → `completed` / `failed`
-- actions: `start_push`, `stop_push`
-- polled by Raspberry Pi agents via `GET /api/agent/tasks`
-- auto-marked `running` on fetch
+**AgentTask** — legacy compatibility model for older polling-based Pi agents.
 
 ## API Reference (MVP)
 
@@ -123,9 +120,9 @@ All responses: `{"code":0, "msg":"ok", "data":...}` or `{"code":N, "msg":"error"
 | POST   | /api/streams              | Create stream (body: channel_id?, protocol?, resolution?, bitrate?) |
 | GET    | /api/streams              | List streams (?status=filter)  |
 | GET    | /api/streams/:id          | Get stream detail              |
-| DELETE | /api/streams/:id          | Delete (kicks publisher + creates stop task) |
-| POST   | /api/streams/:id/start    | Start streaming (creates start_push agent task) |
-| POST   | /api/streams/:id/stop     | Stop streaming (kicks publisher + creates stop task) |
+| DELETE | /api/streams/:id          | Delete (kicks publisher if active) |
+| POST   | /api/streams/:id/start    | Return direct push URL for compatibility |
+| POST   | /api/streams/:id/stop     | Stop streaming by kicking publisher |
 | POST   | /api/callback/publish     | SRS on_publish hook            |
 | POST   | /api/callback/unpublish   | SRS on_unpublish hook          |
 | GET    | /api/agent/tasks          | Get pending tasks (?agent_id=) |

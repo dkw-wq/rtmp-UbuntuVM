@@ -130,10 +130,12 @@ func (db *DB) UpdateStreamStatus(id string, status string, extra map[string]inte
 	return db.Model(&model.Stream{}).Where("id = ?", id).Updates(updates).Error
 }
 
-// UpdateStreamToken updates the push_token column for a stream.
-func (db *DB) UpdateStreamToken(id string, token string) error {
-	return db.Model(&model.Stream{}).Where("id = ?", id).
-		Update("push_token", token).Error
+// UpdateStreamPushAuth updates the stored publish token and full push URL for a stream.
+func (db *DB) UpdateStreamPushAuth(id string, token string, pushURL string) error {
+	return db.Model(&model.Stream{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"push_token": token,
+		"push_url":   pushURL,
+	}).Error
 }
 
 // DeleteStream removes a stream by ID.

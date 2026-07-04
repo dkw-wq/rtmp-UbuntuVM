@@ -91,7 +91,7 @@ echo "$STREAM" | jq '{
 **返回示例：**
 ```json
 {
-  "push_url": "rtmp://jfznbx.cn:1935/live/550e8400-e29b-41d4-a716-446655440000?token=abc123...&expire=1781084864",
+  "push_url": "rtmp://jfznbx.cn:1935/live/550e8400-e29b-41d4-a716-446655440000?token=abc123...",
   "hls_url":  "https://jfznbx.cn/live/550e8400-e29b-41d4-a716-446655440000.m3u8?sign=def456...&expire=1781084864",
   "flv_url":  "https://jfznbx.cn/live/550e8400-e29b-41d4-a716-446655440000.flv?sign=def456...&expire=1781084864"
 }
@@ -104,7 +104,7 @@ ffmpeg -re -f lavfi -i testsrc=size=1920x1080:rate=30 \
   -f lavfi -i sine=frequency=1000 \
   -c:v libx264 -preset ultrafast -b:v 2000k \
   -c:a aac -b:a 128k \
-  -f flv "rtmp://jfznbx.cn:1935/live/550e8400-...?token=abc123...&expire=1781084864"
+  -f flv "rtmp://jfznbx.cn:1935/live/550e8400-...?token=abc123..."
 ```
 
 ### 2.4 播放测试
@@ -124,17 +124,16 @@ vlc "https://jfznbx.cn/live/550e8400-....m3u8?sign=def456...&expire=1781084864"
 ### 3.1 推流地址格式
 
 ```
-rtmp://jfznbx.cn:1935/live/<stream_key>?token=<push_token>&expire=<unix_timestamp>
+rtmp://jfznbx.cn:1935/live/<stream_key>?token=<push_token>
 ```
 
 参数说明：
 | 参数 | 来源 | 说明 |
 |------|------|------|
 | `stream_key` | API 创建流时返回 | 流的唯一标识（UUID v4） |
-| `push_token` | API 创建流时返回 | HMAC-SHA256 推流凭证 |
-| `expire` | API 创建流时返回 | Token 过期时间（Unix 秒），默认 24h |
+| `push_token` | API 创建流时返回 | 服务器生成的长期推流凭证 |
 
-> ⚠️ **必须携带 token 和 expire 参数**，否则服务器会拒绝推流（403）。
+> ⚠️ **必须携带 token 参数**，否则服务器会拒绝推流（403）。`stream_key` 和 `push_token` 只能由服务器管理接口生成。
 
 ### 3.2 Raspberry Pi 推流命令
 
@@ -142,7 +141,7 @@ rtmp://jfznbx.cn:1935/live/<stream_key>?token=<push_token>&expire=<unix_timestam
 #!/bin/bash
 # rpi_push.sh — Raspberry Pi 推流脚本
 
-PUSH_URL="rtmp://jfznbx.cn:1935/live/STREAM_KEY?token=TOKEN&expire=EXPIRE"
+PUSH_URL="rtmp://jfznbx.cn:1935/live/STREAM_KEY?token=TOKEN"
 
 # USB 摄像头
 ffmpeg -re \
@@ -175,12 +174,12 @@ ffmpeg -re \
 | 1280x720 | 1500k–2500k | 高清（推荐） |
 | 1920x1080 | 3000k–5000k | 全高清 |
 
-### 3.4 Token 过期处理
+### 3.4 Token 重置
 
-Token 有效期 24 小时。过期后需要刷新：
+推流 token 长期有效。如果怀疑泄漏或需要更换树莓派配置，可以由管理员重置：
 
 ```bash
-# 刷新推流 token
+# 重置推流 token
 curl -s -X POST "http://jfznbx.cn:9090/api/streams/<stream_id>/refresh-token" \
   -H "Authorization: Bearer $ADMIN_TOKEN" | jq '.data.push_url'
 ```

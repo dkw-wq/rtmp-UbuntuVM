@@ -35,11 +35,11 @@ type srsCallback struct {
 }
 
 // Publish handles SRS on_publish callback.
-// Extracts HMAC token + expire from the RTMP URL and validates them.
+// Extracts the publish token from the RTMP URL and validates it.
 //
 // Two formats are supported:
 //  1. SRS passes query params via the "param" field (e.g., OBS, SRS API)
-//  2. librtmp/FFmpeg appends "?token=xxx&expire=123" to the stream name directly
+//  2. librtmp/FFmpeg appends "?token=xxx" to the stream name directly
 //
 // Returns 200 (allow) on success, 403 (reject) on auth failure.
 func (h *CallbackHandler) Publish(c *gin.Context) {
@@ -50,9 +50,9 @@ func (h *CallbackHandler) Publish(c *gin.Context) {
 		return
 	}
 
-	streamKey, token, expire := h.parsePushAuth(body.Stream, body.Param)
+	streamKey, token, _ := h.parsePushAuth(body.Stream, body.Param)
 
-	if err := h.svc.OnPublish(streamKey, token, expire); err != nil {
+	if err := h.svc.OnPublish(streamKey, token); err != nil {
 		log.Printf("[callback] on_publish rejected: key=%s err=%v", streamKey, err)
 		metrics.SrsCallbackErrorsTotal.WithLabelValues("on_publish").Inc()
 		c.JSON(http.StatusForbidden, H{"code": 1005, "msg": "unauthorized"})
@@ -106,8 +106,8 @@ func (h *CallbackHandler) Stop(c *gin.Context) {
 
 // parsePushAuth extracts stream_key, token, and expire from SRS callback data.
 //
-// Priority 1: SRS "param" field (query string like "token=xxx&expire=123").
-// Priority 2: librtmp/FFmpeg appends "?token=xxx&expire=123" to the stream name.
+// Priority 1: SRS "param" field (query string like "token=xxx").
+// Priority 2: librtmp/FFmpeg appends "?token=xxx" to the stream name.
 // Priority 3: No auth params — return stream key as-is with empty token/expire.
 func (h *CallbackHandler) parsePushAuth(stream, param string) (streamKey string, token string, expire int64) {
 	streamKey = stream
@@ -136,7 +136,7 @@ func (h *CallbackHandler) parsePushAuth(stream, param string) (streamKey string,
 }
 
 // parseTokenParams extracts token and expire from a query-string-like param value.
-// Handles: "token=xxx&expire=123", "?token=xxx&expire=123", "token=xxx"
+// Handles: "token=xxx", "?token=xxx", and old "token=xxx&expire=123" URLs.
 func parseTokenParams(raw string) (token string, expire int64) {
 	raw = strings.TrimPrefix(raw, "?")
 	values, err := url.ParseQuery(raw)

@@ -116,7 +116,8 @@ func (h *StreamHandler) Delete(c *gin.Context) {
 func (h *StreamHandler) Start(c *gin.Context) {
 	id := c.Param("id")
 
-	if err := h.svc.StartStream(id); err != nil {
+	stream, err := h.svc.StartStream(id)
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			Error(c, http.StatusNotFound, CodeNotFound, "stream not found")
 			return
@@ -125,7 +126,11 @@ func (h *StreamHandler) Start(c *gin.Context) {
 		return
 	}
 
-	Success(c, H{"status": "start_requested"})
+	Success(c, H{
+		"status":     "ready",
+		"stream_key": stream.StreamKey,
+		"push_url":   stream.PushURL,
+	})
 }
 
 // Stop handles POST /api/streams/:id/stop

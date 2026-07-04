@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS streams (
     resolution  VARCHAR(20)  DEFAULT '',
     bitrate     VARCHAR(10)  DEFAULT '',
     status      VARCHAR(20)  DEFAULT 'created',
+    push_token  TEXT         DEFAULT '',
     push_url    TEXT         DEFAULT '',
     hls_url     TEXT         DEFAULT '',
     flv_url     TEXT         DEFAULT '',

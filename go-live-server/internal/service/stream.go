@@ -62,7 +62,7 @@ type CreateStreamRequest struct {
 	Bitrate    string `json:"bitrate"`
 }
 
-// CreateStream generates a stream_key, push token, signed play URL, and saves the stream.
+// CreateStream generates a stream_key, publish token, signed play URL, and saves the stream.
 // Write-through cache: saves to Redis alongside PostgreSQL.
 func (s *StreamService) CreateStream(req *CreateStreamRequest) (*model.Stream, error) {
 	streamKey := uuid.New().String()
@@ -77,11 +77,12 @@ func (s *StreamService) CreateStream(req *CreateStreamRequest) (*model.Stream, e
 		channelID = &req.ChannelID
 	}
 
-	// Generate HMAC push token (short-lived, no JWT)
-	pushExpire := time.Now().Add(s.pushExpiry).Unix()
-	pushToken := auth.GeneratePushSign(streamKey, pushExpire, s.pushSecret)
+	pushToken, err := auth.GeneratePublishToken()
+	if err != nil {
+		return nil, err
+	}
 
-	pushURL := fmt.Sprintf("%s/%s?token=%s&expire=%d", s.rtmpBase, streamKey, pushToken, pushExpire)
+	pushURL := fmt.Sprintf("%s/%s?token=%s", s.rtmpBase, streamKey, pushToken)
 	hlsURL := s.generatePlayURL(streamKey, "m3u8")
 	flvURL := s.generatePlayURL(streamKey, "flv")
 
@@ -107,10 +108,7 @@ func (s *StreamService) CreateStream(req *CreateStreamRequest) (*model.Stream, e
 	s.cacheStatus(ctx, stream)
 	s.cachePlayURLs(ctx, stream)
 
-	// Auto-create start_push agent task so the Pi picks it up immediately
-	s.createAgentTask(stream, model.ActionStartPush)
-
-	log.Printf("[service] stream created+started: id=%s key=%s", stream.ID, streamKey)
+	log.Printf("[service] stream created: id=%s key=%s", stream.ID, streamKey)
 	return stream, nil
 }
 
@@ -148,8 +146,6 @@ func (s *StreamService) DeleteStream(id string) error {
 		s.stopPublishing(stream)
 	}
 
-	s.createAgentTask(stream, model.ActionStopPush)
-
 	// Cleanup Redis cache
 	if s.cache != nil {
 		ctx := context.Background()
@@ -159,22 +155,21 @@ func (s *StreamService) DeleteStream(id string) error {
 	return s.db.DeleteStream(id)
 }
 
-// StartStream creates an agent task to begin pushing.
-func (s *StreamService) StartStream(id string) error {
+// StartStream returns stream push information. Publishers can push directly with the stored push URL.
+func (s *StreamService) StartStream(id string) (*model.Stream, error) {
 	stream, err := s.db.GetStreamByID(id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if stream.Status == model.StatusPublishing {
-		return fmt.Errorf("stream is already publishing")
+		return nil, fmt.Errorf("stream is already publishing")
 	}
 
-	s.createAgentTask(stream, model.ActionStartPush)
-	return nil
+	return stream, nil
 }
 
-// StopStream kicks the SRS publishing client and creates a stop task.
+// StopStream kicks the SRS publishing client when it is currently publishing.
 func (s *StreamService) StopStream(id string) error {
 	stream, err := s.db.GetStreamByID(id)
 	if err != nil {
@@ -185,22 +180,23 @@ func (s *StreamService) StopStream(id string) error {
 		s.stopPublishing(stream)
 	}
 
-	s.createAgentTask(stream, model.ActionStopPush)
 	return nil
 }
 
-// RefreshPushToken generates a new HMAC push token with fresh expiry and updates the DB.
+// RefreshPushToken generates a new long-lived publish token and updates the DB.
 func (s *StreamService) RefreshPushToken(id string) (*model.Stream, error) {
 	stream, err := s.db.GetStreamByID(id)
 	if err != nil {
 		return nil, fmt.Errorf("get stream: %w", err)
 	}
 
-	pushExpire := time.Now().Add(s.pushExpiry).Unix()
-	pushToken := auth.GeneratePushSign(stream.StreamKey, pushExpire, s.pushSecret)
-	pushURL := fmt.Sprintf("%s/%s?token=%s&expire=%d", s.rtmpBase, stream.StreamKey, pushToken, pushExpire)
+	pushToken, err := auth.GeneratePublishToken()
+	if err != nil {
+		return nil, err
+	}
+	pushURL := fmt.Sprintf("%s/%s?token=%s", s.rtmpBase, stream.StreamKey, pushToken)
 
-	if err := s.db.UpdateStreamToken(id, pushToken); err != nil {
+	if err := s.db.UpdateStreamPushAuth(id, pushToken, pushURL); err != nil {
 		return nil, fmt.Errorf("update push token: %w", err)
 	}
 
@@ -211,40 +207,38 @@ func (s *StreamService) RefreshPushToken(id string) (*model.Stream, error) {
 	return stream, nil
 }
 
-// ValidatePushToken validates a JWT push token (checks JWT + blacklist).
-// ValidatePushToken validates an HMAC push token and expiry for the given stream key.
-func (s *StreamService) ValidatePushToken(streamKey string, token string, expire int64) error {
-	if token == "" {
+// ValidatePushToken validates a publisher token against the token stored for the stream.
+func (s *StreamService) ValidatePushToken(stream *model.Stream, token string) error {
+	if err := auth.ValidatePublishToken(stream.PushToken, token); err != nil {
 		metrics.AuthFailuresTotal.WithLabelValues("publish").Inc()
-		return fmt.Errorf("push token is required")
-	}
-	if expire <= time.Now().Unix() {
-		metrics.AuthFailuresTotal.WithLabelValues("publish").Inc()
-		return fmt.Errorf("push token has expired")
-	}
-	if err := auth.ValidatePushSign(streamKey, expire, token, s.pushSecret); err != nil {
-		metrics.AuthFailuresTotal.WithLabelValues("publish").Inc()
-		return fmt.Errorf("invalid push token: %w", err)
+		return err
 	}
 	return nil
 }
 
-// OnPublish handles the SRS on_publish callback. Validates token+expire, updates DB + cache.
-func (s *StreamService) OnPublish(streamKey string, token string, expire int64) error {
+// OnPublish handles the SRS on_publish callback. Validates stream key + publish token, updates DB + cache.
+func (s *StreamService) OnPublish(streamKey string, token string) error {
 	stream, err := s.db.GetStreamByKey(streamKey)
 	if err != nil {
 		log.Printf("[service] on_publish: unknown stream key=%s", streamKey)
-		return nil
+		metrics.AuthFailuresTotal.WithLabelValues("publish").Inc()
+		return fmt.Errorf("unknown stream key")
 	}
 
-	if err := s.ValidatePushToken(stream.StreamKey, token, expire); err != nil {
+	if err := s.ValidatePushToken(stream, token); err != nil {
 		log.Printf("[service] on_publish: push token invalid for key=%s: %v", streamKey, err)
 		return err
+	}
+
+	if stream.Status == model.StatusPublishing {
+		metrics.AuthFailuresTotal.WithLabelValues("publish").Inc()
+		return fmt.Errorf("stream is already publishing")
 	}
 
 	now := time.Now()
 	if err := s.db.UpdateStreamStatus(stream.ID, model.StatusPublishing, map[string]interface{}{
 		"started_at": &now,
+		"ended_at":   nil,
 	}); err != nil {
 		return err
 	}
@@ -362,8 +356,8 @@ func (s *StreamService) GetPlaybackInfo(streamKey string) (*model.Stream, error)
 	result := *stream
 	result.HlsURL = s.generatePlayURL(stream.StreamKey, "m3u8")
 	result.FlvURL = s.generatePlayURL(stream.StreamKey, "flv")
-	result.PushURL = ""    // never leak push URL
-	result.PushToken = ""  // never leak push token
+	result.PushURL = ""   // never leak push URL
+	result.PushToken = "" // never leak push token
 	return &result, nil
 }
 
@@ -427,22 +421,6 @@ func (s *StreamService) stopPublishing(stream *model.Stream) {
 		return
 	}
 	log.Printf("[service] kicked srs client: id=%s stream=%s", client.ID, stream.StreamKey)
-}
-
-func (s *StreamService) createAgentTask(stream *model.Stream, action string) {
-	task := &model.AgentTask{
-		StreamID:  stream.ID,
-		Action:    action,
-		Status:    model.TaskStatusPending,
-		StreamKey: stream.StreamKey,
-		PushURL:   stream.PushURL,
-	}
-
-	if err := s.db.CreateTask(task); err != nil {
-		log.Printf("[service] create agent task error: %v", err)
-		return
-	}
-	log.Printf("[service] agent task created: id=%s action=%s", task.ID, action)
 }
 
 // parseBitrateKbps converts a bitrate string like "2000k" to a float64 kbps value.

@@ -93,7 +93,7 @@ print("FLV:   ", d["flv_url"])
         cat <<'HELP'
 stream.sh — one-command stream management
 
-  create [res] [br]    Create + auto-start stream (Pi picks up automatically)
+  create [res] [br]    Create stream and print direct Pi push URL
   list [status]        List streams
   delete <id>          Delete a stream
   playback <key>       Get viewer playback URL
