@@ -5,7 +5,7 @@ set -euo pipefail
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRS_DIR="$BASE_DIR/../srs-build/trunk"
 SRS_BIN="$SRS_DIR/objs/srs"
-SRS_CONF="$SRS_DIR/conf/minimal.conf"
+SRS_CONF="$BASE_DIR/../minimal.conf"
 SRS_HTML="$SRS_DIR/objs/nginx/html"
 REDIS_BIN="$BASE_DIR/../redis-bin/redis-7.2.5/src/redis-server"
 NODE_EXPORTER_BIN="$BASE_DIR/../node_exporter/node_exporter"
@@ -52,8 +52,8 @@ pkill -f "go-live-server/server" 2>/dev/null || true
 pkill -f "redis-server" 2>/dev/null || true
 sleep 1
 
-log "Releasing ports (1935 8080 1985 9090 9091 9100) ..."
-for port in 1935 8080 1985 9090 9091 9100; do
+log "Releasing ports (1935 8082 1985 9090 9091 9100) ..."
+for port in 1935 8082 1985 9090 9091 9100; do
     if ss -lntp 2>/dev/null | grep -q ":$port "; then
         warn "  Port $port in use — killing stale process ..."
         # try user-owned first, then escalate to sudo
@@ -101,7 +101,7 @@ else
 fi
 
 # ── 8. Start SRS ────────────────────────────────────
-log "Starting SRS (RTMP :1935, HTTP :8080, API :1985) ..."
+log "Starting SRS (RTMP :1935, HTTP :8082, API :1985) ..."
 cd "$SRS_DIR"
 "$SRS_BIN" -c "$SRS_CONF" &
 SRS_PID=$!
@@ -112,7 +112,7 @@ if ! kill -0 $SRS_PID 2>/dev/null; then
     die "SRS failed to start — check log: tail -30 $SRS_DIR/objs/srs.log"
 fi
 
-for port in 1935 8080 1985; do
+for port in 1935 8082 1985; do
     if ss -lntp 2>/dev/null | grep -q ":$port "; then
         log "  SRS :$port — OK"
     else
@@ -137,7 +137,7 @@ fi
 log "Health checks ..."
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
 
-for port in 9090 8080 1985; do
+for port in 9090 8082 1985; do
     if curl -s --noproxy '*' "http://127.0.0.1:$port/" >/dev/null 2>&1; then
         log "  :$port — reachable"
     else
@@ -151,7 +151,7 @@ echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━
 echo -e "${GREEN}  All services started${NC}"
 echo ""
 echo -e "  SRS RTMP:       rtmp://127.0.0.1:1935/live"
-echo -e "  HLS / FLV:      http://127.0.0.1:8080/live"
+echo -e "  HLS / FLV:      http://127.0.0.1:8082/live"
 echo -e "  SRS API:        http://127.0.0.1:1985"
 echo -e "  Go Management:  http://127.0.0.1:9090"
 echo ""

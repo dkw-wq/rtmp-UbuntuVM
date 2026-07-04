@@ -783,10 +783,10 @@ Key settings:
 |-----------------------|------------------------------|-----------------------------------------|
 | `listen`              | 1935                         | RTMP ingest port                        |
 | `http_api.listen`     | 1985                         | Management API port                     |
-| `http_server.listen`   | 8080                        | Direct HLS/FLV serving                  |
+| `http_server.listen`   | 8082                        | Direct HLS/FLV serving                  |
 | `hls.hls_path`        | `/dev/shm/hls`               | HLS segment storage (tmpfs)             |
-| `hls.hls_fragment`    | 3                            | Segment duration in seconds             |
-| `hls.hls_window`      | 15                           | Playlist window in seconds (5 segments) |
+| `hls.hls_fragment`    | 4                            | Segment duration in seconds             |
+| `hls.hls_window`      | 60                           | Playlist window in seconds (~15 segments) |
 | `http_hooks.on_publish`| `http://localhost:9090/api/callback` | Publish callback             |
 | `http_hooks.on_unpublish`| `http://localhost:9090/api/callback` | Unpublish callback           |
 
