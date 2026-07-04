@@ -49,7 +49,7 @@ print("Playback HTTP-FLV:")
 print("  " + d.get("flv_url", "N/A"))
 print("")
 print("Test push (on VM, no Pi):")
-print("  ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 -c:v libx264 -preset ultrafast -b:v 2000k -f flv \"" + d["push_url"] + "\"")
+print("  go build -o push-test ./cmd/push-test && ./push-test -push-url \"" + d["push_url"] + "\"")
 ' "$resp"
         ;;
 

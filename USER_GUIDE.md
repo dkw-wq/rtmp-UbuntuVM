@@ -165,7 +165,39 @@ ffmpeg -re \
   -f flv "$PUSH_URL"
 ```
 
-### 3.3 常用分辨率和码率
+### 3.3 服务器端测试推流工具
+
+项目内置 `push-test`，用于在服务器端生成彩色测试视频、计时器叠字和正弦音频，并直接推到 SRS：
+
+```bash
+cd go-live-server
+go build -o push-test ./cmd/push-test
+
+./push-test \
+  -push-url "rtmp://jfznbx.cn:1935/live/<stream_key>?token=<push_token>"
+```
+
+本机 SRS 测试：
+
+```bash
+./push-test \
+  -rtmp-base rtmp://127.0.0.1:1935/live \
+  -stream-key "<stream_key>" \
+  -token "<push_token>"
+```
+
+生成 MP4 后循环推流：
+
+```bash
+./push-test \
+  -push-url "$PUSH_URL" \
+  -make-mp4 /tmp/srs-test.mp4 \
+  -file-duration 30s
+```
+
+更多参数见 `go-live-server/cmd/push-test/README.md`。
+
+### 3.4 常用分辨率和码率
 
 | 分辨率 | 码率 | 适用场景 |
 |--------|------|----------|
@@ -174,7 +206,7 @@ ffmpeg -re \
 | 1280x720 | 1500k–2500k | 高清（推荐） |
 | 1920x1080 | 3000k–5000k | 全高清 |
 
-### 3.4 Token 重置
+### 3.5 Token 重置
 
 推流 token 长期有效。如果怀疑泄漏或需要更换树莓派配置，可以由管理员重置：
 
@@ -184,7 +216,7 @@ curl -s -X POST "http://jfznbx.cn:9090/api/streams/<stream_id>/refresh-token" \
   -H "Authorization: Bearer $ADMIN_TOKEN" | jq '.data.push_url'
 ```
 
-### 3.5 推流状态检查
+### 3.6 推流状态检查
 
 ```bash
 # 查看流是否正在推流
