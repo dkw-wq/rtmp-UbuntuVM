@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: live-monitoring
+    orgId: 1
+    folder: Live
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /opt/rtmp-UbuntuVM/monitoring/grafana/dashboards

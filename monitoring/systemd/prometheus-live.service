@@ -1,0 +1,18 @@
+[Unit]
+Description=Prometheus for live streaming stack
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/prometheus \
+  --config.file=/opt/rtmp-UbuntuVM/monitoring/prometheus/prometheus.yml \
+  --storage.tsdb.path=/var/lib/prometheus \
+  --web.listen-address=127.0.0.1:9092 \
+  --web.enable-lifecycle
+Restart=always
+RestartSec=5
+User=prometheus
+Group=prometheus
+
+[Install]
+WantedBy=multi-user.target

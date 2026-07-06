@@ -1,0 +1,30 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /opt/rtmp-UbuntuVM/monitoring/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - 127.0.0.1:9092
+
+  - job_name: go-live-server
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - 127.0.0.1:9091
+
+  - job_name: node
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - 127.0.0.1:9100
+
+  - job_name: hls-monitor
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - 127.0.0.1:9093

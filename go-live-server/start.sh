@@ -89,7 +89,7 @@ if [ -x "$NODE_EXPORTER_BIN" ]; then
     log "Starting node_exporter (:9100) ..."
     pkill -f "node_exporter" 2>/dev/null || true
     sleep 0.5
-    nohup "$NODE_EXPORTER_BIN" --web.listen-address=0.0.0.0:9100 > /tmp/node_exporter.log 2>&1 &
+    nohup "$NODE_EXPORTER_BIN" --web.listen-address=127.0.0.1:9100 > /tmp/node_exporter.log 2>&1 &
     sleep 1
     if ss -lntp 2>/dev/null | grep -q ":9100 "; then
         log "  node_exporter :9100 — OK"

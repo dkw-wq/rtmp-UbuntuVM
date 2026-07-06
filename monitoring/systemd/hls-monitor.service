@@ -1,0 +1,21 @@
+[Unit]
+Description=Live HLS health monitor exporter
+After=network.target go-live.service srs.service
+Wants=go-live.service srs.service
+
+[Service]
+Type=simple
+ExecStart=/opt/rtmp-UbuntuVM/go-live-server/hls-monitor \
+  -listen 127.0.0.1:9093 \
+  -go-health http://127.0.0.1:9090/api/health \
+  -srs-api http://127.0.0.1:1985 \
+  -rtmp-addr 127.0.0.1:1935 \
+  -hls-base http://127.0.0.1:8082/live
+WorkingDirectory=/opt/rtmp-UbuntuVM/go-live-server
+Restart=always
+RestartSec=5
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

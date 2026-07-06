@@ -91,12 +91,12 @@ func main() {
 	// streams were still publishing.
 	go reconcileStreamMetrics(db, cacheClient)
 
-	// ---- metrics HTTP server (port 9091) ----
+	// ---- metrics HTTP server (localhost only, port 9091) ----
 	go func() {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promhttp.Handler())
-		log.Printf("[metrics] serving on :9091")
-		if err := http.ListenAndServe(":9091", mux); err != nil {
+		log.Printf("[metrics] serving on 127.0.0.1:9091")
+		if err := http.ListenAndServe("127.0.0.1:9091", mux); err != nil {
 			log.Printf("[metrics] server error: %v", err)
 		}
 	}()

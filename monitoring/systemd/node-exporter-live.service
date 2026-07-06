@@ -1,0 +1,14 @@
+[Unit]
+Description=Prometheus Node Exporter for live streaming host
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/rtmp-UbuntuVM/node_exporter/node_exporter --web.listen-address=127.0.0.1:9100
+Restart=always
+RestartSec=5
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

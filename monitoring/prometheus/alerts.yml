@@ -1,0 +1,112 @@
+groups:
+  - name: live-service
+    rules:
+      - alert: GoLiveMetricsDown
+        expr: up{job="go-live-server"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: Go live metrics endpoint is down
+          description: Prometheus cannot scrape 127.0.0.1:9091/metrics.
+
+      - alert: HLSMonitorDown
+        expr: up{job="hls-monitor"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: HLS monitor exporter is down
+          description: Prometheus cannot scrape 127.0.0.1:9093/metrics.
+
+      - alert: SRSAPIDown
+        expr: live_component_up{component="srs_api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: SRS API is unavailable
+          description: hls-monitor cannot reach SRS API on 127.0.0.1:1985.
+
+      - alert: RTMPPortDown
+        expr: live_component_up{component="rtmp"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: RTMP ingest port is unavailable
+          description: hls-monitor cannot connect to 127.0.0.1:1935.
+
+      - alert: HLSPlaylistDown
+        expr: hls_playlist_up == 0
+        for: 45s
+        labels:
+          severity: critical
+        annotations:
+          summary: HLS playlist is unavailable
+          description: HLS playlist check failed for stream {{ $labels.stream_key }}.
+
+      - alert: HLSPlaylistTooShort
+        expr: hls_playlist_segments > 0 and hls_playlist_segments < 3
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: HLS playlist has too few segments
+          description: Stream {{ $labels.stream_key }} has only {{ $value }} HLS segments.
+
+      - alert: HLSLatestSegmentDown
+        expr: hls_latest_segment_up == 0
+        for: 45s
+        labels:
+          severity: critical
+        annotations:
+          summary: Latest HLS segment cannot be fetched
+          description: Latest TS segment check failed for stream {{ $labels.stream_key }}.
+
+      - alert: SRSCallbackErrors
+        expr: increase(srs_callback_errors_total[5m]) > 0
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: SRS callback errors are increasing
+          description: SRS callback error counter increased in the last 5 minutes.
+
+      - alert: PublishAuthFailuresSpike
+        expr: increase(auth_failures_total{type="publish"}[5m]) > 5
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: Publish auth failures spiked
+          description: More than 5 publish auth failures occurred in the last 5 minutes.
+
+  - name: host
+    rules:
+      - alert: HostHighCPU
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Host CPU usage is high
+          description: CPU usage has been above 85% for 5 minutes.
+
+      - alert: HostLowMemory
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.15
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Host memory is low
+          description: Available memory is below 15%.
+
+      - alert: HostLowDisk
+        expr: node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"} < 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Host disk space is low
+          description: Filesystem {{ $labels.mountpoint }} has less than 20% free space.

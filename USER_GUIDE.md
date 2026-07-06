@@ -454,9 +454,67 @@ def generate_play_sign(stream_key: str, expire: int, secret: str) -> str:
 
 ---
 
-## 7. 常见问题排查
+## 7. 监控访问
 
-### 7.1 推流失败
+监控入口：
+
+```text
+https://jfznbx.cn/monitor/
+```
+
+监控使用 Grafana 展示，Prometheus 在服务器本机采集指标，不直接暴露到公网。
+
+### 7.1 部署监控
+
+```bash
+cd /opt/rtmp-UbuntuVM
+sudo bash monitoring/install-monitoring.sh
+```
+
+然后把 `monitoring/nginx/monitor.conf` 加到 `jfznbx.cn` 的 HTTPS `server {}` 块内，并设置 Basic Auth：
+
+```bash
+sudo apt-get install -y apache2-utils
+sudo htpasswd -c /etc/nginx/.htpasswd-monitor admin
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+### 7.2 监控组件
+
+| 组件 | 地址 | 说明 |
+|------|------|------|
+| Grafana | `https://jfznbx.cn/monitor/` | 公网监控入口，需密码 |
+| Prometheus | `127.0.0.1:9092` | 内部采集和告警规则 |
+| Go metrics | `127.0.0.1:9091/metrics` | API、业务、DB、Redis 指标 |
+| node_exporter | `127.0.0.1:9100/metrics` | 服务器 CPU/内存/磁盘/网络 |
+| hls-monitor | `127.0.0.1:9093/metrics` | SRS/HLS 播放链路健康 |
+
+### 7.3 健康检查
+
+```bash
+curl http://127.0.0.1:9091/metrics
+curl http://127.0.0.1:9100/metrics
+curl http://127.0.0.1:9093/metrics
+curl http://127.0.0.1:9092/-/ready
+curl http://127.0.0.1:3000/api/health
+```
+
+重点告警包括：
+
+- Go/SRS/RTMP 端口不可用
+- HLS playlist 拉取失败
+- HLS playlist 分片数少于 3
+- 最新 TS 分片不可访问
+- SRS 回调错误增长
+- 推流鉴权失败突增
+- CPU、内存、磁盘异常
+
+---
+
+## 8. 常见问题排查
+
+### 8.1 推流失败
 
 **现象：FFmpeg 报 `Input/output error`**
 
@@ -476,20 +534,20 @@ ffmpeg -re -f lavfi -i testsrc=size=320x240:rate=10 \
   "rtmp://jfznbx.cn:1935/live/test_key"
 ```
 
-### 7.2 播放黑屏 / 无画面
+### 8.2 播放黑屏 / 无画面
 
 1. **签名过期** — 重新获取播放 URL
 2. **流未在推** — 确认流状态为 `publishing`
 3. **HLS 需要等待 3-6 秒** — HLS 有首片延迟，用 FLV 替代可降低延迟
 4. **浏览器限制** — HTTPS 页面不能加载 HTTP 资源，确保 URL 以 `https://` 开头
 
-### 7.3 延迟太大
+### 8.3 延迟太大
 
 - FLV 延迟约 1-3 秒，HLS 约 3-6 秒
 - 在 FFmpeg 推流端添加 `-tune zerolatency` 减少编码延迟
 - Raspberry Pi 端建议使用硬件编码 `h264_v4l2m2m`
 
-### 7.4 查看服务器端日志
+### 8.4 查看服务器端日志
 
 ```bash
 # SSH 到服务器后执行：
@@ -504,7 +562,7 @@ journalctl -u go-live -f
 curl -s http://127.0.0.1:1985/api/v1/clients/ | jq '.data.clients[] | {name, type, publish, alive}'
 ```
 
-### 7.5 获取帮助
+### 8.5 获取帮助
 
 服务器信息速查：
 ```
